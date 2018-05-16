@@ -1,0 +1,824 @@
+#!/bin/bash
+
+#==============================================================================
+# Copyright @ 2014 Puppet Labs, LLC
+# Redistribution prohibited.
+# Address: 308 SW 2nd Ave., 5th Floor Portland, OR 97204
+# Phone: (877) 575-9775
+# Email: info@puppetlabs.com
+#
+# Please refer to the LICENSE.pdf file included
+# with the Puppet Enterprise distribution
+# for licensing information.
+#===============================================================================
+
+#===[ Summary ]=================================================================
+
+# This program installs Puppet Enterprise. Run this file to start the
+# installation or run with a "-h" option to display help.
+
+#===[ Conventions ]=============================================================
+
+# See style guide
+
+#===============================================================================
+
+#===[ Global Varables ]=========================================================
+# Directory paths
+readonly INSTALLER_DIR="$(readlink -f "$(dirname "${0}")")"
+readonly LOGFILE_DIR='/var/log/puppetlabs/installer'
+readonly LOGFILE_NAME="$(date +'%Y-%m-%dT%H.%M.%S%z').install.log"
+readonly LOGFILE_PATH="${LOGFILE_DIR}/${LOGFILE_NAME}"
+readonly MODULE_DIR='/opt/puppetlabs/server/data/enterprise/modules'
+readonly PACKAGE_DIR='/opt/puppetlabs/server/data/packages/public'
+readonly PUPPET_BIN_DIR='/opt/puppetlabs/puppet/bin'
+readonly PUPPET_SHARE_DIR='/opt/puppetlabs/puppet/share'
+readonly SERVER_DIR="/opt/puppetlabs/server"
+readonly OLD_OPT_DIR="/opt/puppet"
+readonly ENTERPRISE_DIR="/etc/puppetlabs/enterprise"
+readonly ENTERPRISE_CONF_DIR="/etc/puppetlabs/enterprise/conf.d"
+readonly ENTERPRISE_CONF_PATH="${ENTERPRISE_CONF_DIR}/pe.conf"
+readonly DEFAULT_CONF_FILE_PATH="${INSTALLER_DIR?}/conf.d/pe.conf"
+
+# Common variables
+readonly SCRIPT_NAME="$(basename "${0}")"
+readonly PE_REPO_NAME='puppet_enterprise'
+# if a default editor is not set, use vi
+if [[ -z $EDITOR ]]; then
+    readonly EDITOR=vi
+fi
+
+# Source bootstrap-metadata. This file is generated at compose time
+# and contains the following variables:
+# PE_BUILD_VERSION, AIO_AGENT_VERSION and PLATFORM_TAG
+readonly BOOTSTRAP_METADATA="${INSTALLER_DIR?}/packages/bootstrap-metadata"
+if [[ -f $BOOTSTRAP_METADATA ]]; then
+  # the below shellcheck comment is needed to make shellcheck happy,
+  # as it attempts to actually source the file, which is dynamically
+  # generated at compose time.
+  #
+  # shellcheck source=/dev/null
+  source "${BOOTSTRAP_METADATA}"
+else
+  err "packages/bootstrap-metadata file missing"
+  exit 1
+fi
+
+# The following globals are set by option flags and will be set to
+# readonly after parsing.
+CONF_FILE_PATH=""
+IS_DEBUG='false'
+#IS_NOOP='false'
+IS_SUPPRESS_OUTPUT='false'
+#IS_VERBOSE_DEBUG='false'
+IS_INTERACTIVE_MODE='true'
+
+#=== FUNCTION ==================================================================
+#        NAME:  print_usage
+# DESCRIPTION:  Print usage instructions.
+#===============================================================================
+print_usage() {
+    cat <<-EOF
+USAGE: ${SCRIPT_NAME?} [-c CONF_FILE] [-D] [-h] [-q] [-V] [-y]
+
+OPTIONS:
+
+    -c <PATH_TO_FILE>
+        Use pe.conf at <PATH_TO_FILE>.
+
+        If you don't use this flag on installation, the installer will create
+        a pe.conf file for you and open in your \$EDITOR (${EDITOR}).
+
+        If you don't provide this flag on upgrade, the installer will attempt
+        to use your pre-existing pe.conf, or if that file can't be found, it
+        will create a pe.conf file and open it in your \$EDITOR (${EDITOR}).
+
+        If you have a pre-existing pe.conf, the installer will overwrite it if
+        you use this flag. Note that installer will create a backup of the
+        pre-existing pe.conf before overwriting it.
+    -D
+        Display debugging information.
+    -h
+        Display this help.
+    -q
+        Run in quiet mode; the installation process is not displayed.
+    -V
+        Display very verbose debugging information.
+    -y
+        Assume yes/default and bypass any prompts for user input or
+        file editing using \$EDITOR (${EDITOR}). Ensure that your
+        pe.conf file is valid before using this flag.
+EOF
+}
+
+
+#=== FUNCTION ================================================================
+#        NAME:  get_timestamp
+# DESCRIPTION:  Provides a way of getting a tk log style timestamp
+#=============================================================================
+get_timestamp() {
+  local timestamp
+  timestamp=$(date +'%Y-%m-%d %H:%M:%S,%N')
+  echo "${timestamp:0:23}" # match tk log output
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  get_unix_timestamp
+# DESCRIPTION:  Provides a way of getting a unix style timestamp
+#=============================================================================
+get_unix_timestamp() {
+  local timestamp
+  timestamp=$(date +'%s')
+  echo "${timestamp}"
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  err
+# DESCRIPTION:  A function so as to provide a shorthand error command
+#=============================================================================
+err() {
+  printf "%s [ERROR]: %s\n" "$(get_timestamp)" "$@" >&2 | tee -a "${LOGFILE_PATH?}"
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  cmd
+# DESCRIPTION:  A portable 'which' command
+#   ARGUMENTS:
+#               1. Name of the program to see if it is installed
+#=============================================================================
+cmd() {
+  local program_name="${1?}"
+  hash "${program_name?}" >&/dev/null;
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  run
+# DESCRIPTION:  A function so as to provide a shorthand run and log command
+#   ARGUMENTS:
+#               1. Command to run
+#=============================================================================
+run() {
+  local run_command="${1?}"
+  printf "%s Running command: %s\n" "$(get_timestamp)" "${run_command}" 2>&1 | tee -a "${LOGFILE_PATH?}"
+  ( eval "${run_command?}" ) 2>&1 | tee -a "${LOGFILE_PATH?}"
+  # Return the status of the command, not tee
+  return "${PIPESTATUS[0]}"
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  display
+# DESCRIPTION:  Echo and log
+#   ARGUMENTS:
+#               1. Message to be echoed and logged
+#=============================================================================
+display() {
+  local message="${1?}"
+  echo "${message}" 2>&1 | tee -a "${LOGFILE_PATH?}"
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  display_announcement
+# DESCRIPTION:  Announce something to the user
+#   ARGUMENTS:
+#               1. Message to be announced
+#=============================================================================
+display_announcement() {
+  local message="${1?}"
+  display_new_line
+  display "## ${message}"
+  display_new_line
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  display_line_break
+# DESCRIPTION:  Display a line break
+#=============================================================================
+display_line_break() {
+  display "============================================================="
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  display_new_line
+# DESCRIPTION:  Display an 80 character line break
+#=============================================================================
+display_new_line() {
+  display ""
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  display_pe_header
+# DESCRIPTION:  Displays the PE header
+#=============================================================================
+display_pe_header() {
+  display_line_break
+  display "    Puppet Enterprise Installer"
+  display_line_break
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  main
+# DESCRIPTION:  Controls program flow.
+#=============================================================================
+main() {
+  #----------------------------------------------------------------------------
+  # Check if we are running as root first
+  #----------------------------------------------------------------------------
+  if [[ "$(id -u)" -ne 0 ]]; then
+    err "${SCRIPT_NAME?} must be run as root"
+    exit 1
+  fi
+
+  #----------------------------------------------------------------------------
+  # Parse the input for flags
+  #----------------------------------------------------------------------------
+  while getopts c:DhqVy name; do
+      case "$name" in
+          c)
+              CONF_FILE_PATH="$(readlink -f "${OPTARG?}")"
+              ;;
+          D)
+              IS_DEBUG='true'
+              ;;
+          h)
+              print_usage
+              exit 0
+              ;;
+          n)
+#              IS_NOOP='true'
+              ;;
+          q)
+              IS_SUPPRESS_OUTPUT='true'
+              ;;
+          V)
+              set -x
+#              IS_VERBOSE_DEBUG='true'
+              ;;
+          y)
+              IS_INTERACTIVE_MODE='false'
+              ;;
+          ?)
+              print_usage
+              exit 1
+              ;;
+      esac
+  done
+
+  # If a config file is specified, assume the user knows what they are doing
+  # This behavior is similar to the old installer.
+  if [[ -n "${CONF_FILE_PATH}" ]]; then
+    IS_INTERACTIVE_MODE='false'
+  fi
+
+  #-------------------------------------------------------------------------
+  # Input validation
+  #-------------------------------------------------------------------------
+  readonly IS_DEBUG
+  readonly IS_NOOP
+  readonly IS_INTERACTIVE_MODE
+  readonly IS_SUPPRESS_OUTPUT
+  readonly IS_VERBOSE_DEBUG
+
+  if [[ y = "${IS_SUPPRESS_OUTPUT}" ]]; then
+    # suppress output from the install process
+    exec > /dev/null 2>&1
+  fi
+
+  #-------------------------------------------------------------------------
+  # High-level installer logic
+  #-------------------------------------------------------------------------
+  # This handling is only appropriate for installs.
+  # Will need to revisit for upgrades.
+  pushd "${INSTALLER_DIR?}"
+  prepare_logging
+  detect_platform_packaging
+  pre_upgrade_validation
+  display_pe_header
+
+  # if a config file is not specified
+  if [[ -z "${CONF_FILE_PATH}" ]]; then
+    # ask the user what type of install to do
+    if is_interactive_mode && is_web_install; then
+      launch_web_installer_and_quit
+      # we do not return from here
+    elif [[ -n "$(existing_pe_version)" && -f "${ENTERPRISE_CONF_PATH}" ]]; then
+      use_existing_pe_conf
+    else
+      if is_interactive_mode; then
+        prepare_a_pe_conf
+      else
+        err "The -y flag cannot be used without the -c flag if a valid pe.conf"
+        err "cannot be found at ${ENTERPRISE_CONF_PATH}."
+        exit 1
+      fi
+    fi
+  fi
+
+  # Confirm that the user would actually like to install using the pe.conf file
+  # located at ${CONF_FILE_PATH} (set by use_existing_pe_conf/prepare_a_pe_conf)
+  if is_interactive_mode && ! confirm_proceed_with_install_or_upgrade; then
+    exit 1
+  fi
+
+  do_install
+  popd
+}
+
+#=== FUNCTION ================================================================
+#        NAME: prepare_logging
+# DESCRIPTION: Prepares logging
+#=============================================================================
+prepare_logging() {
+  mkdir -p "${LOGFILE_DIR?}"
+  touch "${LOGFILE_PATH?}"
+  chmod 600 "${LOGFILE_PATH?}"
+}
+
+#=== FUNCTION ================================================================
+#        NAME: do_install
+# DESCRIPTION: Proceed with an install based on a config file.
+#=============================================================================
+do_install() {
+    disable_puppet_agent
+    install_puppet_agent
+    # Sanity check on pe.conf file provided
+    validate_pe_conf
+    install_modules
+    install_pe
+}
+
+#=== FUNCTION ================================================================
+#        NAME: user_confirmation $TEXT
+# DESCRIPTION: Confirm with user that they actually want to proceed with
+#              $TEXT. Assumes yes by default.
+#=============================================================================
+user_confirmation() {
+  if [[ -z "${1}" ]]; then
+    err "FATAL: user_confirmation() called without an argument"
+    exit 1
+  fi
+
+  local text="${1}"
+  echo -en "\n ${text} [Yn]"
+  read -r interview_answer
+  if [[ -z "${interview_answer}" || "${interview_answer}" =~ ^[Yy][Ee]?[Ss]? ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+#=== FUNCTION ================================================================
+#        NAME: confirm_proceed_with_install_or_upgrade
+# DESCRIPTION: Confirm with user that they actually want to proceed with
+#              the upgrade and exits if not. Assumes yes by default.
+#=============================================================================
+confirm_proceed_with_install_or_upgrade() {
+  if [[ -n "$(existing_pe_version)" ]]; then
+    user_confirmation "Proceed with upgrade/repair of $(existing_pe_version) using the pe.conf at ${CONF_FILE_PATH}?"
+  else
+    user_confirmation "Proceed with installation using the pe.conf at ${CONF_FILE_PATH}?"
+  fi
+
+  return $?
+}
+
+#=== FUNCTION ================================================================
+#        NAME: pre_upgrade_validation
+# DESCRIPTION: Check the system for conditions which might cause an
+#              upgrade to fail and exit early if a condition is met.
+#=============================================================================
+pre_upgrade_validation() {
+  # Disallow upgrades from 3.x
+  if [[ -f "${OLD_OPT_DIR}/pe_version" ]]; then
+    installed_version=$(cat "${OLD_OPT_DIR}/pe_version")
+    err " Upgrades from PE ${installed_version} are not supported."
+    err " Please review the 2016.2 migration documentation for instructions on moving to this version of PE."
+    exit 1
+  fi
+}
+
+#=== FUNCTION ================================================================
+#        NAME: pe_version
+# DESCRIPTION: Get the version of PE from the tarball
+#=============================================================================
+pe_version() {
+  cat "${INSTALLER_DIR?}/VERSION" 2> /dev/null
+}
+
+#=== FUNCTION ================================================================
+#        NAME: pe_link_version
+# DESCRIPTION: Get the version of PE from the tarball formatted for the docs
+#              link.
+#=============================================================================
+pe_link_version() {
+  pe_version | cut -d '.' -f1,2
+}
+
+#=== FUNCTION ================================================================
+#        NAME: existing_pe_version
+# DESCRIPTION: Determine the version of PE already installed on the system
+#              (if any.) Otherwise, return an empty string.
+#=============================================================================
+existing_pe_version() {
+  if [[ -f "${SERVER_DIR}/pe_version" ]]; then
+    installed_version=$(cat "${SERVER_DIR}/pe_version")
+    echo "${installed_version}"
+  else
+    echo ""
+  fi
+}
+
+
+#=== FUNCTION ================================================================
+#        NAME: is_interactive_mode
+# DESCRIPTION: Return true if the interactive flag has been set
+#=============================================================================
+is_interactive_mode() {
+  if [[ "${IS_INTERACTIVE_MODE}" == 'true' ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+#=== FUNCTION ================================================================
+#        NAME: is_web_install
+# DESCRIPTION: Interview the user about what type of install to do.
+#              Returns 0 if they choose the web install, 1 for text.
+#=============================================================================
+is_web_install() {
+    local interview_answer
+    if [[ -n "$(existing_pe_version)" ]]; then
+      display_new_line
+      display_announcement "We've detected an existing Puppet Enterprise $(existing_pe_version) install."
+      if user_confirmation "Would you like to proceed with text-mode upgrade/repair?"; then
+        return 1
+      else
+        # PE-15352 Higgs upgrade/configure is not supported at this time.
+        exit 1
+      fi
+    else
+      display "Puppet Enterprise offers two different methods of installation."
+      display_new_line
+      display " [1] Guided install"
+      display_new_line
+      display "Recommended for beginners. This method will install and configure a temporary"
+      display "webserver to walk you through the various configuration options."
+      display_new_line
+      display "NOTE: This method requires you to be able to access port 3000 on this machine"
+      display "from your desktop web browser."
+      display_new_line
+      display " [2] Text-mode"
+      display_new_line
+      display "Recommended for advanced users. This method will open your \$EDITOR (${EDITOR})"
+      display "with a PE config file (pe.conf) for you to edit before you proceed with installation."
+      display_new_line
+      display "The pe.conf file is a HOCON formatted file that declares parameters and values needed to"
+      display "install and configure PE."
+      display "We recommend that you review it carefully before proceeding."
+      display_new_line
+      display_line_break
+      display_new_line
+      echo -en "\n How to proceed? [1]: "
+      read -r interview_answer
+      if [[ "${interview_answer?}" -eq 2 ]]; then
+          return 1
+      fi
+      return 0
+    fi
+}
+
+#=== FUNCTION ================================================================
+#        NAME: launch_web_installer_and_quit
+# DESCRIPTION: If the user opts for a guided install, launch the web gui
+#=============================================================================
+launch_web_installer_and_quit() {
+    install_puppet_agent
+
+    display_announcement "We're preparing the Web Installer..."
+    # Launch GUI installer if a config file is not specified.
+    # Start installer service
+    local platform_hostname
+    platform_hostname="$(/opt/puppetlabs/puppet/bin/facter fqdn)"
+    # This will block
+    pushd "${PUPPET_SHARE_DIR?}/installer" &>/dev/null
+    run "mkdir -p ${PUPPET_SHARE_DIR?}/installer/installer"
+    run "cp -pR ${INSTALLER_DIR?}/* ${PUPPET_SHARE_DIR?}/installer/installer/"
+    display "Please go to https://${platform_hostname?}:3000 in your browser to \
+continue installation. Be sure to use 'https://' and that port 3000 is reachable \
+through the firewall."
+    run "RACK_ENV=production ${PUPPET_BIN_DIR?}/bundle exec thin start \
+--debug -p 3000 -a 0.0.0.0 --ssl --ssl-disable-verify &> /dev/null"
+    popd &>/dev/null
+    exit 0
+}
+
+#=== FUNCTION ================================================================
+#        NAME: use_existing_pe_conf
+# DESCRIPTION: Set the conf file path to the pre-existing pe.conf.
+#=============================================================================
+use_existing_pe_conf() {
+  display_announcement "We've found a pe.conf file at ${ENTERPRISE_CONF_PATH}."
+  CONF_FILE_PATH=${ENTERPRISE_CONF_PATH?}
+}
+
+#=== FUNCTION ================================================================
+#        NAME: prepare_a_pe_conf
+# DESCRIPTION: Prepare a pe.conf file to be edited by the user.
+#=============================================================================
+prepare_a_pe_conf() {
+  local custom_pe_conf="${INSTALLER_DIR?}/conf.d/custom-pe.conf"
+  CONF_FILE_PATH=${custom_pe_conf?}
+  if [ -f "${CONF_FILE_PATH?}" ]; then
+    if user_confirmation "We've found a pe.conf file at ${CONF_FILE_PATH}. Do you want to proceed using this file? Answer Y to proceed with configuration. Answer N to open the file in your editor (${EDITOR})."; then
+      display_announcement "We'll proceed using pe.conf found at ${CONF_FILE_PATH}..."
+    else
+      edit_pe_conf
+    fi
+  else
+    display_announcement "We are creating a new pe.conf file at ${CONF_FILE_PATH}..."
+    run "cp ${DEFAULT_CONF_FILE_PATH?} ${CONF_FILE_PATH?}"
+
+    edit_pe_conf
+  fi
+}
+
+#=== FUNCTION ================================================================
+#        NAME: edit_pe_conf
+# DESCRIPTION: Allow the user to edit the specified pe.conf before
+#              proceeding.
+#=============================================================================
+edit_pe_conf() {
+  display_announcement "We're opening ${CONF_FILE_PATH?} in ${EDITOR?}..."
+  "${EDITOR?}" "${CONF_FILE_PATH?}"
+  display_announcement "You edited ${CONF_FILE_PATH?} in ${EDITOR?}."
+}
+
+#=== FUNCTION ================================================================
+#        NAME: validate_pe_conf
+# DESCRIPTION: Basic sanity check for the pe.conf file before we attempt to use it
+#=============================================================================
+validate_pe_conf() {
+  # Try loading the conf file with Ruby HOCON
+  display_new_line
+  display_announcement "We're checking if ${CONF_FILE_PATH?} contains valid HOCON syntax..."
+  run "${PUPPET_BIN_DIR}/ruby -e \"\
+require 'hocon';\
+;\
+begin;\
+  conf = Hocon.load('${CONF_FILE_PATH}');\
+rescue Hocon::ConfigError::ConfigParseError => e;\
+  puts %Q{\\nERROR: Your pe.conf at ${CONF_FILE_PATH} contains invalid HOCON syntax: #{e}\\n\\n};\
+  exit 1;\
+end;\
+;\
+if conf['console_admin_password'] && conf['console_admin_password'].empty?;\
+  puts %Q{\\nERROR: Please specify a console_admin_password in your pe.conf file at ${CONF_FILE_PATH}.\\n\\n};\
+  exit 1;\
+end\""
+
+  local result=$?
+  if [[ "${result}" != "0" ]]; then
+    err "Your pe.conf file at ${CONF_FILE_PATH} contains errors."
+    err "Please check your pe.conf file for errors and try again."
+    exit 1
+  fi
+}
+
+#=== FUNCTION ================================================================
+#        NAME: detect_platform_packaging
+# DESCRIPTION: Detects the platforms package manager by checking for
+#              the existence of a /etc/*-release file. Sets the global
+#              variable PLATFORM_PACKAGING, otherwise exits 1 if it
+#              cannot determine the package manager.
+#
+#              This is a niave implementation, but still a bit safer
+#              then relying only on the precense of 'rpm' or 'apt'
+#              packages being available, since apt could be installed on
+#              rpm for example. This check is also not sufficient for if
+#              this is a supported platform.
+#=============================================================================
+detect_platform_packaging() {
+  if [ -f /etc/redhat-release  ]; then
+    PLATFORM_PACKAGING='rpm'
+  elif [ -f /etc/SuSE-release ]; then
+    PLATFORM_PACKAGING='zypper'
+  elif cmd "lsb_release"; then
+    # Ubuntu doesn't have a *-release file,
+    # and lsb_release isn't installed by default on other platforms
+    # so fall back to this after looking for the others.
+    local lsb_release_id
+    lsb_release_id=$(lsb_release -is)
+    if [ "${lsb_release_id}" = "Ubuntu" ]; then
+      PLATFORM_PACKAGING='apt'
+    fi
+  fi
+
+  if [ -z "${PLATFORM_PACKAGING:-""}" ]; then
+    err "Unknown Platform. Please visit https://docs.puppetlabs.com/pe/latest/install_system_requirements.html"
+    exit 1
+  else
+    readonly PLATFORM_PACKAGING
+  fi
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  disable_puppet_agent
+# DESCRIPTION:  Sets the disable lockfile preventing puppet agent runs.
+#
+#               This routine also traps INT TERM EXIT and QUIT signals,
+#               registering enable_puppet_agent so that we are
+#               reasonably sure to remove the disable lockfile before
+#               exiting.  Kill cannot be trapped.
+#=============================================================================
+disable_puppet_agent() {
+  if [ -e "${PUPPET_BIN_DIR?}/puppet" ]; then
+    trap enable_puppet_agent EXIT
+    trap "enable_puppet_agent; exit 1" INT TERM QUIT
+    run "${PUPPET_BIN_DIR?}/puppet agent \
+      --disable='puppet-enterprise-installer preparing to configure node'"
+  fi
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  enable_puppet_agent
+# DESCRIPTION:  Clears the disable lockfile, allowing puppet agent runs.
+#=============================================================================
+enable_puppet_agent() {
+  [ -e "${PUPPET_BIN_DIR?}/puppet" ] && run "${PUPPET_BIN_DIR?}/puppet agent --enable"
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  install_puppet_agent
+# DESCRIPTION:  Installs puppet agent by configuring a local package
+#               repository and calling the respective install commands.
+#=============================================================================
+install_puppet_agent() {
+  local base_pkg_dir="${PACKAGE_DIR?}/${PE_BUILD_VERSION?}"
+  local pkg_dir="${base_pkg_dir?}/${PLATFORM_TAG?}-${AIO_AGENT_VERSION?}"
+  local installer_pkg_path="${INSTALLER_DIR?}/packages"
+  local installer_gpg_key_path="${installer_pkg_path?}/GPG-KEY-puppetlabs"
+
+  display_announcement "We're installing the Puppet Agent..."
+  run "mkdir -p ${pkg_dir?}"
+  run "cp -r -L ${installer_pkg_path?}/${PLATFORM_TAG?}/* ${pkg_dir?}"
+  run "cp -r -L ${installer_gpg_key_path?} ${PACKAGE_DIR?}"
+
+  case "${PLATFORM_PACKAGING?}" in
+    rpm)
+      # Why would we need to create this folder? copied from old installer
+      run "mkdir -p /etc/yum.repos.d"
+      # Create repo file
+      local repo_file="/etc/yum.repos.d/${PE_REPO_NAME?}.repo"
+      run "echo '[${PE_REPO_NAME}]' > ${repo_file}"
+      run "echo 'name=PuppetLabs PE Packages \$releasever - \$basearch' >> ${repo_file}"
+      run "echo 'baseurl=file://${pkg_dir?}' >> ${repo_file}"
+      run "echo 'enabled=1' >> ${repo_file}"
+      run "echo 'gpgcheck=1' >> ${repo_file}"
+      run "echo 'gpgkey=file://${PACKAGE_DIR?}/GPG-KEY-puppetlabs' >> ${repo_file}"
+      # Import GPG key and install puppet
+      run "rpm --import ${installer_gpg_key_path?}"
+      run "yum clean all --disablerepo='*' --enablerepo=${PE_REPO_NAME?}"
+      run "yum install -y puppet-agent pe-bundler pe-installer"
+      ;;
+    zypper)
+      run "rpm --import ${installer_gpg_key_path?}"
+      # Zypper's service-add command fails if the service name is
+      # already in use. To always ensure we have the latest repo, delete
+      # the service if it already exists before adding it.
+      if zypper service-list | grep -q "${PE_REPO_NAME?}"; then
+        run "zypper service-delete ${PE_REPO_NAME?}"
+      fi
+      run "zypper service-add --type=yum file://'${pkg_dir?}' ${PE_REPO_NAME?}"
+      run "zypper refresh --repo ${PE_REPO_NAME?} || :"
+      run "zypper install --repo ${PE_REPO_NAME?} -y puppet-agent pe-bundler pe-installer"
+      ;;
+    apt)
+      run "mkdir -p /etc/apt/sources.list.d"
+      run "echo 'deb file:${pkg_dir?} ./' > /etc/apt/sources.list.d/${PE_REPO_NAME?}.list"
+      run "apt-key add ${INSTALLER_DIR?}/packages/GPG-KEY-puppetlabs"
+      run "apt-get update -q -y"
+      run "DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        -o Apt::Get::Purge=false \
+        -o Dpkg::Options::='--force-confold' \
+        -o Dpkg::Options::='--force-confdef' \
+        -o Dpkg::Options::='--force-confmiss' \
+        --no-install-recommends puppet-agent pe-bundler pe-installer"
+      ;;
+  esac
+}
+
+#=== FUNCTION ================================================================
+#        NAME:  install_modules
+# DESCRIPTION:  Installs the modules shipped with PE.
+#               Will also copy the .tar.gz version of the modules to a
+#               mount point for PE to serve to compile masters.
+#=============================================================================
+install_modules() {
+  display_announcement "We're configuring the PE Modules..."
+  local installer_module_path="${INSTALLER_DIR?}/modules"
+
+  for module_pkg in ${installer_module_path?}/*.tar.gz; do
+    run "${PUPPET_BIN_DIR?}/puppet module install ${module_pkg?} \
+      --force \
+      --ignore-dependencies \
+      --modulepath ${MODULE_DIR?}"
+  done
+
+  local pe_modules_mount_dir="${SERVER_DIR?}/share/installer/modules"
+
+  # Remove existing modules in the case of an upgrade
+  run "rm -rf ${pe_modules_mount_dir?}"
+  # Copy the .tar.gz module files for the master to serve over
+  # the filer server
+  run "mkdir -p ${pe_modules_mount_dir?}"
+  run "cp -R -L ${INSTALLER_DIR?}/modules/* ${pe_modules_mount_dir?}"
+  run "chmod 0755 ${pe_modules_mount_dir?}"
+  run "chmod -R 0750 ${MODULE_DIR?}"
+}
+
+install_pe() {
+  display_announcement "We're configuring PE using ${CONF_FILE_PATH}..."
+
+  # Copy the pe_build version file into place
+  run "mkdir -p ${SERVER_DIR?}"
+  run "cp -L ${INSTALLER_DIR?}/VERSION ${SERVER_DIR?}/pe_build"
+  run "chown root:root ${SERVER_DIR?}/pe_build"
+  run "chmod 644 ${SERVER_DIR?}/pe_build"
+
+  # Copy the hiera.yaml and conf file into place
+  run "mkdir -p ${ENTERPRISE_CONF_DIR?}"
+  run "cp ${INSTALLER_DIR?}/conf.d/hiera.yaml ${ENTERPRISE_DIR}"
+  CONF_FILE_DEST="${ENTERPRISE_CONF_DIR?}/pe.conf"
+  if [ -f "${CONF_FILE_DEST?}" ]; then
+    run "cp ${CONF_FILE_DEST?} ${ENTERPRISE_CONF_DIR?}/pe-$(get_unix_timestamp).conf"
+  fi
+  run "cp ${CONF_FILE_PATH?} ${CONF_FILE_DEST?}"
+  run "chown -R root:root ${ENTERPRISE_DIR?}"
+  run "chmod -R 600 ${ENTERPRISE_DIR?}"
+
+  # Copy the uninstaller
+  run "cp ${INSTALLER_DIR?}/puppet-enterprise-uninstaller /opt/puppetlabs/bin"
+  run "chown root:root /opt/puppetlabs/bin/puppet-enterprise-uninstaller"
+  run "chmod 755 /opt/puppetlabs/bin/puppet-enterprise-uninstaller"
+
+  if [ "${IS_DEBUG?}" = "true" ]; then
+    local debug_flag="--debug"
+  else
+    local debug_flag=""
+  fi
+
+  local cmd="${PUPPET_BIN_DIR?}/puppet enterprise configure \
+${debug_flag?} \
+--detailed-exitcodes \
+--modulepath ${MODULE_DIR?}"
+
+  local count=0
+  local blocking=true
+  while ${blocking?} && [ "${count?}" -le 36 ]; do
+    run "${cmd?}"
+    local result=$?
+    if [ "${result?}" = 17 ]; then
+      # puppet enterprise configure returns 17 if agent lockfile is up
+      display '* waiting for an agent run to complete...'
+      sleep 5
+    else
+      local blocking=false
+    fi
+    local count=$((count + 1))
+  done
+  display "* ${cmd}"
+  display "* returned: ${result}"
+  case "${result}" in
+    0 | 2)
+      display_announcement "Puppet Enterprise configuration complete!"
+      display "Documentation: https://docs.puppet.com/pe/$(pe_link_version)/index.html"
+      display "Release notes: https://docs.puppet.com/pe/$(pe_link_version)/release_notes.html"
+      display_new_line
+      display "If this is a monolithic configuration, run 'puppet agent -t' to"
+      display "complete the setup of this system."
+      display_new_line
+      display "If this is a split configuration, install or upgrade the remaining"
+      display "PE components, and then run puppet agent -t on the Puppet master, "
+      display "PuppetDB, and PE console, in that order."
+      ;;
+    *)
+      err "!! There were problems during the application of the installation catalog. !!"
+      err "!! Please review the logs at ${LOGFILE_PATH} and resolve any issues you can find. !!"
+      err "!! After fixing any errors, re-run the installer to complete the installation or upgrade. !!"
+      exit ${result}
+      ;;
+  esac
+}
+
+upgrade_pe() {
+  # mco stop puppet
+  # backup and upgrade modules
+  # puppet apply upgrade module, if run completes, continue, otherwise bail
+  # puppet agent run
+  echo ""
+}
+
+main "$@"
+
+# vim: tabstop=2:softtabstop=2:shiftwidth=2:expandtab:tw=72:fo=cqt:wm=0

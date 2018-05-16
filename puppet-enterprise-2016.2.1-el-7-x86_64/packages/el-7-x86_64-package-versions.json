@@ -1,0 +1,117 @@
+{
+  "pe-client-tools": {
+    "version": "1.0.4.4.g9f88c4a",
+    "md5": "dc501f48cbddbe1cedd16d5021f02023",
+    "release": "1"
+  },
+  "pe-r10k": {
+    "version": "2.3.0.1",
+    "md5": "40eb3d4823881792881b518288ebcbbd",
+    "release": "1"
+  },
+  "pe-postgresql-devel": {
+    "version": "9.4.7",
+    "md5": "722b4c406a5357a84e2b3746dfe09c9d",
+    "release": "1.pe"
+  },
+  "pe-console-services-termini": {
+    "version": "1.4.89",
+    "md5": "0e6d682e31d9cc1faea2fd2508c9701e",
+    "release": "1"
+  },
+  "pe-license": {
+    "version": "0.1.5.13",
+    "md5": "9a97b988c37becd39d21038ebc3e92e3",
+    "release": "1.pe"
+  },
+  "pe-postgresql-server": {
+    "version": "9.4.7",
+    "md5": "5f14186ea944dfc18c9839ec8e100901",
+    "release": "1.pe"
+  },
+  "pe-razor-libs": {
+    "version": "1.0.1",
+    "md5": "52ef833af6653dafa2c54575d196b965",
+    "release": "9"
+  },
+  "pe-puppet-license-cli": {
+    "version": "0.1.7.24",
+    "md5": "5741865eb50a05560ebaf71e5d1b808f",
+    "release": "1.pe"
+  },
+  "puppet-agent": {
+    "version": "1.5.3",
+    "md5": "b7894ae2c864787751eb63bfabb642e6",
+    "release": "1"
+  },
+  "pe-puppetdb-termini": {
+    "version": "4.1.4",
+    "md5": "15c633d1508d97256eb94f6ae06c317c",
+    "release": "1"
+  },
+  "pe-razor-server": {
+    "version": "1.3.0.0",
+    "md5": "c41323d7577c2329cb5044b6be39fb6f",
+    "release": "1.pe"
+  },
+  "pe-java": {
+    "version": "1.8.0.101",
+    "md5": "adf27c16ab0adf2ababe861d91a082b6",
+    "release": "1.b13.pe"
+  },
+  "pe-orchestration-services": {
+    "version": "0.5.15",
+    "md5": "eafc8157f56c3ad39a5a9ffad8d27816",
+    "release": "1"
+  },
+  "pe-nginx": {
+    "version": "1.8.1",
+    "md5": "eff870092898eee76fa43b68ef882264",
+    "release": "1.pe"
+  },
+  "pe-puppetdb": {
+    "version": "4.1.4",
+    "md5": "1cee19311b49ddfa853a90f94593ebf1",
+    "release": "1"
+  },
+  "pe-puppet-enterprise-release": {
+    "version": "2016.2.1.0",
+    "md5": "2e293e1e48cecd9f8cf9ea4b981ee2db",
+    "release": "1.pe"
+  },
+  "pe-puppetserver": {
+    "version": "2016.2.1.0",
+    "md5": "38a80091ea671f7ab391116be80928d6",
+    "release": "1"
+  },
+  "pe-console-services": {
+    "version": "1.4.89",
+    "md5": "ad199b601a9bd1e38b19459594623c33",
+    "release": "1"
+  },
+  "pe-bundler": {
+    "version": "1.8.2",
+    "md5": "f35eef2e6cb6b3b86e7866b8b79b2234",
+    "release": "3"
+  },
+  "pe-postgresql-contrib": {
+    "version": "9.4.7",
+    "md5": "69ff25bc24b54d9272475f191eb49fc2",
+    "release": "1.pe"
+  },
+  "pe-activemq": {
+    "version": "5.13.2",
+    "md5": "51519c31aa0222dab33d0db485b0a615",
+    "release": "2.pe"
+  },
+  "pe-installer": {
+    "version": "2016.1.0.47",
+    "md5": "ba0a67ae36f428ff01835fc45fd08935",
+    "release": "1"
+  },
+  "pe-postgresql": {
+    "version": "9.4.7",
+    "md5": "3c236f43a9f5284845688e054e4ef2a2",
+    "release": "1.pe"
+  }
+}
